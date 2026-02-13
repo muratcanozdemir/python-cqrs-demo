@@ -1,0 +1,43 @@
+name: deploy
+
+on:
+  workflow_run:
+    workflows: ["docker"]
+    types: [completed]
+
+jobs:
+  blue_green_deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            # Pull the latest image
+            docker pull ghcr.io/${{ github.repository }}/cqrs-demo:latest
+
+            # Determine which stack is live
+            LIVE_STACK=$(docker ps --format '{{.Names}}' | grep api-blue || true)
+            if [ "$LIVE_STACK" = "api-blue" ]; then
+              # Blue is live → deploy green
+              docker compose -f docker-compose.green.yml up -d
+              # Wait for green to start
+              sleep 5
+              # Stop blue
+              docker compose -f docker-compose.blue.yml down
+            else
+              # Green is live or nothing → deploy blue
+              docker compose -f docker-compose.blue.yml up -d
+              sleep 5
+              docker compose -f docker-compose.green.yml down
+            fi
+
+            # Optional: check health
+            curl -f http://localhost:8000/health || exit 1

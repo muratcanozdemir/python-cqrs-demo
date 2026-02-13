@@ -1,0 +1,128 @@
+name: full_pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/cqrs-demo:latest
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # 1. Lint + tests
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+
+
+      - name: Lint
+        run: ruff src
+
+      - name: Run tests
+        run: pytest -q
+
+  # 2. Build Docker image
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker
+        run: docker build -t ${{ env.IMAGE_NAME }} .
+
+  # 3. Security scan with Trivy
+  security:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+  # 4. SBOM generation
+  sbom:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Syft
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh
+
+      - name: Generate SBOM
+        run: ./bin/syft . -o spdx-json > sbom.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+
+  # 5. Push Docker image to GHCR
+  push:
+    needs: [security, sbom]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push image
+        run: |
+          docker tag ${{ env.IMAGE_NAME }} ${{ env.IMAGE_NAME }}
+          docker push ${{ env.IMAGE_NAME }}
+
+  # 6. Blue/Green Deployment
+  deploy:
+    needs: push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SSH Deploy with Blue/Green
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            # Pull latest image
+            docker pull ${{ env.IMAGE_NAME }}
+
+            # Determine live stack
+            LIVE_STACK=$(docker ps --format '{{.Names}}' | grep api-blue || true)
+
+            if [ "$LIVE_STACK" = "api-blue" ]; then
+              # Deploy green
+              docker compose -f docker-compose.green.yml up -d
+              sleep 5
+              docker compose -f docker-compose.blue.yml down
+            else
+              # Deploy blue
+              docker compose -f docker-compose.blue.yml up -d
+              sleep 5
+              docker compose -f docker-compose.green.yml down
+            fi
+
+            # Minimal health check
+            curl -f http://localhost:8000/health || exit 1
+
+            # Replay read model
+            docker exec -i api-blue python -m src.replay || true
+            docker exec -i api-green python -m src.replay || true

@@ -1,0 +1,21 @@
+name: security
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t cqrs-demo .
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: cqrs-demo
+          severity: CRITICAL,HIGH
+          exit-code: 1
