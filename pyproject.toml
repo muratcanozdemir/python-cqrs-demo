@@ -4,15 +4,18 @@ version = "0.1.0"
 description = "Before/after CQRS demo with FastAPI + MongoDB"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi",
+    'ruff","fastapi",
     "uvicorn",
     "pymongo",
     "pydantic"
 ]
-dev-dependencies = [
+[project.optional-dependencies]
+dev = [
     "pytest",
+    "pytest-cov",
     "ruff",
-    "syft"
+    "syft",
+    "hatch"
 ]
 
 [tool.uvicorn]
